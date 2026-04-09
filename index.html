@@ -121,9 +121,22 @@
 let loads = null;
 let activeTruck = 0;
 
-const SYS = `You are a logistics data extraction assistant. Extract shipment load data from the email and return ONLY valid JSON with this structure:
-{"date":"MM/DD/YYYY","shipFrom":{"name":"","address":"","cityStateZip":""},"shipTo":{"name":"","address":"","cityStateZip":""},"trucks":[{"truckNumber":1,"totalPallets":27,"totalWeight":"42,237","totalValue":"$202,963.50","asns":["ASN-PO00005874-1 (RN-23715) - ALL PALLETS"],"lines":[{"sku":"","labelRev":"","lot":"","pallets":8,"dims":"48x40x50","combinedLot":false}]}]}
-Return ONLY the JSON. No explanation, no markdown fences.`;
+const SYS = `You are a logistics data extraction assistant. Extract shipment load data from ANY text input — formal emails, casual messages, or rough notes — and return ONLY valid JSON with this structure:
+{"date":"MM/DD/YYYY","shipFrom":{"name":"","address":"","cityStateZip":""},"shipTo":{"name":"","address":"","cityStateZip":""},"trucks":[{"truckNumber":1,"totalPallets":0,"totalWeight":"0","totalValue":"N/A","asns":[],"lines":[{"sku":"General Freight","labelRev":"N/A","lot":"N/A","pallets":0,"dims":"N/A","combinedLot":false}]}]}
+
+Rules:
+- Use today's date if no date is mentioned.
+- If only one shipment is described, create one truck entry.
+- If weight is mentioned but not pallets, estimate pallets as 1 unless stated otherwise.
+- If no SKU, lot, or label rev is mentioned, use "General Freight", "N/A", and "N/A".
+- If no value is mentioned, use "N/A".
+- Any mention of "bill to", "billing", "billed to", or "invoice to" must go into the thirdPartyBillTo fields — NOT into shipTo.
+- shipTo should only contain the physical delivery destination address.
+- Never return an error — always do your best to extract whatever is available.
+- Return ONLY the JSON. No explanation, no markdown fences.
+
+The JSON structure must include thirdPartyBillTo:
+{"date":"MM/DD/YYYY","shipFrom":{"name":"","address":"","cityStateZip":""},"shipTo":{"name":"","address":"","cityStateZip":""},"thirdPartyBillTo":{"name":"","address":"","cityStateZip":""},"trucks":[...]}`;
 
 function goTo(step) {
   [0,1,2].forEach(i => {
@@ -160,11 +173,32 @@ async function parseEmail() {
     });
     const data = await res.json();
     const raw = (data.content?.find(b=>b.type==='text')?.text||'').replace(/```json|```/g,'').trim();
-    loads = JSON.parse(raw);
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch(e) {
+      // Try to extract JSON from anywhere in the response
+      const match = raw.match(/\{[\s\S]*\}/);
+      if(match) parsed = JSON.parse(match[0]);
+      else throw new Error('No JSON found');
+    }
+    // Ensure required fields exist with fallbacks
+    parsed.date = parsed.date || new Date().toLocaleDateString('en-US');
+    parsed.shipFrom = parsed.shipFrom || {name:'',address:'',cityStateZip:''};
+    parsed.shipTo = parsed.shipTo || {name:'',address:'',cityStateZip:''};
+    parsed.thirdPartyBillTo = parsed.thirdPartyBillTo || {name:'',address:'',cityStateZip:''};
+    parsed.trucks = parsed.trucks || [{truckNumber:1,totalPallets:0,totalWeight:'0',totalValue:'N/A',asns:[],lines:[]}];
+    parsed.trucks.forEach((t,i)=>{
+      t.truckNumber = t.truckNumber || i+1;
+      t.totalPallets = t.totalPallets || 0;
+      t.totalWeight = t.totalWeight || '0';
+      t.totalValue = t.totalValue || 'N/A';
+      t.asns = t.asns || [];
+      t.lines = t.lines || [];
+    });
+    loads = parsed;
     activeTruck = 0;
     goTo(1);
   } catch(e) {
-    errEl.textContent = 'Could not parse email. Make sure it includes ship from/to addresses and load details.';
+    errEl.textContent = 'Could not parse input. Please include at least a pickup address, delivery address, and what is being shipped.';
     errEl.classList.remove('hidden');
   } finally {
     btn.disabled = false;
@@ -260,10 +294,10 @@ function buildBOLPage(truck) {
     </div>
     <div style="border:1px solid #000;border-left:none;padding:3px 4px;min-height:60px">
       <div style="font-size:6pt;font-weight:bold;text-transform:uppercase;border-bottom:1px solid #000;margin-bottom:2px;padding-bottom:1px">THIRD PARTY FREIGHT CHARGES BILL TO:</div>
-      <div style="font-size:5.5pt;font-weight:bold;color:#555">Name:</div><div style="font-size:7pt;border-bottom:1px solid #ccc;margin-bottom:1px">&nbsp;</div>
-      <div style="font-size:5.5pt;font-weight:bold;color:#555">Address:</div><div style="font-size:7pt;border-bottom:1px solid #ccc;margin-bottom:1px">&nbsp;</div>
-      <div style="font-size:5.5pt;font-weight:bold;color:#555">City/State/Zip:</div><div style="font-size:7pt;border-bottom:1px solid #ccc;margin-bottom:1px">&nbsp;</div>
-      <div style="font-size:5.5pt;margin-top:3px">${cb(true)}Prepaid &nbsp;${cb(false)}Collect &nbsp;${cb(false)}3rd Party</div>
+      <div style="font-size:5.5pt;font-weight:bold;color:#555">Name:</div><div style="font-size:7pt;border-bottom:1px solid #ccc;margin-bottom:1px">${loads.thirdPartyBillTo?.name||'&nbsp;'}</div>
+      <div style="font-size:5.5pt;font-weight:bold;color:#555">Address:</div><div style="font-size:7pt;border-bottom:1px solid #ccc;margin-bottom:1px">${loads.thirdPartyBillTo?.address||'&nbsp;'}</div>
+      <div style="font-size:5.5pt;font-weight:bold;color:#555">City/State/Zip:</div><div style="font-size:7pt;border-bottom:1px solid #ccc;margin-bottom:1px">${loads.thirdPartyBillTo?.cityStateZip||'&nbsp;'}</div>
+      <div style="font-size:5.5pt;margin-top:3px">${loads.thirdPartyBillTo?.name ? cb(false)+'Prepaid &nbsp;'+cb(false)+'Collect &nbsp;'+cb(true)+'3rd Party' : cb(true)+'Prepaid &nbsp;'+cb(false)+'Collect &nbsp;'+cb(false)+'3rd Party'}</div>
     </div>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;margin-top:-1px">
