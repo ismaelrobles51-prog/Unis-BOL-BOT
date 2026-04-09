@@ -131,7 +131,12 @@ Rules:
 - If no SKU, lot, or label rev is mentioned, use "General Freight", "N/A", and "N/A".
 - If no value is mentioned, use "N/A".
 - Any mention of "bill to", "billing", "billed to", or "invoice to" must go into the thirdPartyBillTo fields — NOT into shipTo.
-- shipTo should only contain the physical delivery destination address.
+- "From", "from address", "pickup", "picking up from", "shipper", or "origin" all refer to shipFrom.
+- "To", "to address", "delivery", "deliver to", "going to", "destination", or "consignee" all refer to shipTo.
+- shipFrom is always the pickup/origin location. shipTo is always the delivery/destination location.
+- Never swap shipFrom and shipTo — from = shipper = origin, to = delivery = destination.
+- "SKU", "item", "product", "commodity", "goods", or "what is being shipped" all map to the "sku" field which represents the commodity description.
+- Do NOT extract or include Lot # in any field — ignore it completely.
 - Never return an error — always do your best to extract whatever is available.
 - Return ONLY the JSON. No explanation, no markdown fences.
 
@@ -161,44 +166,55 @@ async function parseEmail() {
   btn.innerHTML = '<span class="spinner"></span>Parsing…';
   errEl.classList.add('hidden');
   try {
+    const requestBody = JSON.stringify({
+      model:'claude-sonnet-4-20250514',
+      max_tokens:1500,
+      system: SYS,
+      messages:[{role:'user',content:text}]
+    });
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        model:'claude-sonnet-4-20250514',
-        max_tokens:1000,
-        system: SYS,
-        messages:[{role:'user',content:text}]
-      })
+      body: requestBody
     });
     const data = await res.json();
     const raw = (data.content?.find(b=>b.type==='text')?.text||'').replace(/```json|```/g,'').trim();
     let parsed;
-    try { parsed = JSON.parse(raw); } catch(e) {
-      // Try to extract JSON from anywhere in the response
+    // Try direct parse first, then extract JSON block
+    try { parsed = JSON.parse(raw); }
+    catch(e) {
       const match = raw.match(/\{[\s\S]*\}/);
-      if(match) parsed = JSON.parse(match[0]);
-      else throw new Error('No JSON found');
+      if(match) { try { parsed = JSON.parse(match[0]); } catch(e2) { parsed = null; } }
     }
-    // Ensure required fields exist with fallbacks
+    // If still null, build a minimal object from the raw text
+    if(!parsed) {
+      parsed = {
+        date: new Date().toLocaleDateString('en-US'),
+        shipFrom:{name:'',address:'',cityStateZip:''},
+        shipTo:{name:'',address:'',cityStateZip:''},
+        thirdPartyBillTo:{name:'',address:'',cityStateZip:''},
+        trucks:[{truckNumber:1,totalPallets:1,totalWeight:'0',totalValue:'N/A',asns:[],lines:[{sku:'General Freight',labelRev:'N/A',lot:'N/A',pallets:1,dims:'N/A',combinedLot:false}]}]
+      };
+    }
+    // Apply fallbacks to all fields
     parsed.date = parsed.date || new Date().toLocaleDateString('en-US');
     parsed.shipFrom = parsed.shipFrom || {name:'',address:'',cityStateZip:''};
     parsed.shipTo = parsed.shipTo || {name:'',address:'',cityStateZip:''};
     parsed.thirdPartyBillTo = parsed.thirdPartyBillTo || {name:'',address:'',cityStateZip:''};
-    parsed.trucks = parsed.trucks || [{truckNumber:1,totalPallets:0,totalWeight:'0',totalValue:'N/A',asns:[],lines:[]}];
+    parsed.trucks = (parsed.trucks && parsed.trucks.length) ? parsed.trucks : [{truckNumber:1,totalPallets:1,totalWeight:'0',totalValue:'N/A',asns:[],lines:[{sku:'General Freight',labelRev:'N/A',lot:'N/A',pallets:1,dims:'N/A',combinedLot:false}]}];
     parsed.trucks.forEach((t,i)=>{
       t.truckNumber = t.truckNumber || i+1;
       t.totalPallets = t.totalPallets || 0;
-      t.totalWeight = t.totalWeight || '0';
+      t.totalWeight = String(t.totalWeight||'0');
       t.totalValue = t.totalValue || 'N/A';
       t.asns = t.asns || [];
-      t.lines = t.lines || [];
+      t.lines = (t.lines && t.lines.length) ? t.lines : [{sku:'General Freight',labelRev:'N/A',lot:'N/A',pallets:t.totalPallets||1,dims:'N/A',combinedLot:false}];
     });
     loads = parsed;
     activeTruck = 0;
     goTo(1);
   } catch(e) {
-    errEl.textContent = 'Could not parse input. Please include at least a pickup address, delivery address, and what is being shipped.';
+    errEl.textContent = 'Unexpected error: '+e.message+'. Please try again.';
     errEl.classList.remove('hidden');
   } finally {
     btn.disabled = false;
@@ -315,31 +331,25 @@ function buildBOLPage(truck) {
   </div>
   <table style="width:100%;border-collapse:collapse;margin-top:-1px">
     <thead><tr style="background:#eee">
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:23%">SKU</th>
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:10%">LABEL REV</th>
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:13%">LOT #</th>
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:7%">HDLG QTY</th>
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:6%">PKG QTY</th>
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:6%"># PKGS</th>
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:7%">PALLET</th>
+      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:28%">COMMODITY DESCRIPTION</th>
+      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:9%">PALLET COUNT</th>
+      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:9%">CARTON COUNT</th>
+      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:10%">NMFC #</th>
+      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:7%">CLASS</th>
+      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:6%">H.M.</th>
       <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:10%">DIMS</th>
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:9%">WEIGHT(LBS)</th>
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:5%">H.M.</th>
-      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:4%">CLASS</th>
+      <th style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;width:10%">WEIGHT(LBS)</th>
     </tr></thead>
     <tbody>
       ${truck.lines.map(l=>`<tr style="${l.combinedLot?'background:#fff9e6':''}">
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt">${l.sku}</td>
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.labelRev}</td>
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt">${l.lot}${l.combinedLot?' ★':''}</td>
+        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt">${l.sku}${l.combinedLot?' ★':''}</td>
         <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.pallets||'—'}</td>
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt"></td>
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.pallets||'—'}</td>
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${cb(true)}</td>
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.dims}</td>
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt"></td>
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt"></td>
-        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt"></td>
+        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.cartons||''}</td>
+        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.nmfc||''}</td>
+        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.freightClass||''}</td>
+        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.hm||''}</td>
+        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.dims||''}</td>
+        <td style="border:1px solid #000;padding:2px 3px;font-size:6.5pt;text-align:center">${l.weight||''}</td>
       </tr>`).join('')}
       <tr><td colspan="11" style="border:1px solid #000;height:10px"></td></tr>
       <tr style="background:#f5f5f5;font-weight:bold">
